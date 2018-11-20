@@ -1,0 +1,150 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Elasticsearch and Kibana Docker Stack
+
+Parameters:
+  EnvType:
+    Type: String
+    Default: 'dev'
+
+  EnvName:
+    Type: String
+    Default: 'dev'
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: ''
+
+  ImageId:
+    Type: String
+    Default: ''
+
+  KeyName:
+    Type: String
+    Default: ''
+
+  SubnetAId:
+    Type: String
+    Default: ''
+
+  SubnetBId:
+    Type: String
+    Default: ''
+
+  InstanceType:
+    Description: 'Instance type'
+    Type: String
+    Default: 'm4.large'
+
+  SpotPrice:
+    Description: 'Spot Price to Use'
+    Type: String
+    Default: '0.04'
+
+Resources:
+  
+  SecurityGroup:  
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupName: !Sub "es-${EnvType}-${EnvName}"
+      GroupDescription: "Security Group - ES Stack"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '22'
+          ToPort: '22'
+          CidrIp: 144.53.221.200/32
+        - IpProtocol: tcp
+          FromPort: '9200'
+          ToPort: '9200'
+          CidrIp: 144.53.221.200/32  
+        - IpProtocol: tcp
+          FromPort: '5601'
+          ToPort: '5601'
+          CidrIp: 144.53.221.200/32              
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: 'EnvName'
+          Value: !Ref EnvName
+        - Key: 'EnvType'
+          Value: !Ref EnvType
+        - Key: 'Name'
+          Value: !Sub "sg-es-${EnvType}-${EnvName}"
+
+  EC2Instance:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Metadata:
+      AWS::CloudFormation::Init:
+        configSets:
+          InstallAndRun:
+            - Install
+            - Run
+        Install:
+          commands:
+            install-compose:
+              command: "curl -L \"https://github.com/docker/compose/releases/download/1.23.1/docker-compose-$(uname -s)-$(uname -m)\" -o /usr/local/bin/docker-compose"
+            make-executable:
+              command: "chmod +x /usr/local/bin/docker-compose"
+            update-sysctl-param:
+              command: "sysctl -w vm.max_map_count=262144"
+            update-sysctl-file:
+              command: "echo vm.max_map_count=262144 >> /etc/sysctl.conf"
+          files:
+            /home/ec2-user/docker-compose.yaml:
+              user: 'ec2-user'
+              group: 'ec2-user'
+              content: !Join
+                - ''
+                - - "---\n"
+                  - "version: '3'\n"
+                  - "services:\n"
+                  - "  elasticsearch:\n"
+                  - "    image: docker.elastic.co/elasticsearch/elasticsearch:6.5.0\n"
+                  - "    ports:\n"
+                  - "      - 9200:9200\n"
+                  - "      - 9300:9300\n"
+                  - "    environment:\n"
+                  - "      - bootstrap.memory_lock=true\n"
+                  - "      - \"ES_JAVA_OPTS=-Xms2G -Xmx2G\"\n"
+                  - "      - discovery.type=single-node\n"
+                  - "    ulimits:\n"                                    
+                  - "      memlock:\n"
+                  - "        soft: -1\n"
+                  - "        hard: -1\n"
+                  - "      nofile:\n"
+                  - "        soft: 65536\n"
+                  - "        hard: 65536\n"
+                  - "\n"
+                  - "  kibana:\n"
+                  - "    image: docker.elastic.co/kibana/kibana:6.5.0\n"
+                  - "    ports:\n"
+                  - "      - 5601:5601\n"
+        Run:
+          commands:
+            run-stack:
+              command: "sudo -u ec2-user /usr/local/bin/docker-compose -f /home/ec2-user/docker-compose.yaml up -d"
+
+    Properties:
+      ImageId: !Ref ImageId
+      SecurityGroups:
+        - !Ref SecurityGroup
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SpotPrice: !Ref SpotPrice
+      UserData:
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            yum install -y aws-cfn-bootstrap
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Instance --configsets InstallAndRun --region ${AWS::Region}
+
+  EC2AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref SubnetAId
+        - !Ref SubnetBId
+      LaunchConfigurationName: !Ref EC2Instance
+      MinSize: '1'
+      MaxSize: '1'
+      DesiredCapacity: '1'
